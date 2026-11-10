@@ -13,7 +13,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 
 from custom_components.room_presence.const import DOMAIN
-from custom_components.room_presence.tracker import ibeacon_matches, parse_beacon
+from custom_components.room_presence.tracker import ibeacon_matches, match_access_point, parse_beacon
 
 UUID = "8e16244496a544dfa721c7cc6f9933f7"
 BEACON = f"{UUID}_100_40004"
@@ -159,3 +159,29 @@ async def test_config_flow_lists_companion_beacon(hass: HomeAssistant) -> None:
     assert done["type"] is FlowResultType.CREATE_ENTRY
     assert done["title"] == "Cyril"
     assert done["data"] == {"beacon": BEACON, "use_motion": True}
+
+
+def test_bssid_matches_access_point():
+    aps = {"ac:8b:a9:44:82:15": "main_floor", "e4:38:83:90:33:a5": "upstairs", "1c:0b:8b:6e:30:9f": "upstairs"}
+    assert match_access_point("ac:8b:a9:44:82:17", aps) == "main_floor"
+    assert match_access_point("e6:38:83:90:33:a7", aps) == "upstairs"  # local bit set on another SSID
+    assert match_access_point("ac:8b:a9:44:83:17", aps) is None
+    assert match_access_point("not a mac", aps) is None
+
+
+async def test_wifi_floor_from_access_point_area(hass: HomeAssistant) -> None:
+    fake = FakeBT()
+    hass.states.async_set("sensor.flip7_wi_fi_bssid", "ac:8b:a9:44:82:17")
+    floors = __import__("homeassistant.helpers.floor_registry", fromlist=["x"]).async_get(hass)
+    main = floors.async_create("Main floor")
+    entry, living, kitchen = await _setup(hass, fake, {"bssid_entity": "sensor.flip7_wi_fi_bssid"})
+    ar.async_get(hass).async_update(living.id, floor_id=main.floor_id)
+    owner = MockConfigEntry(domain="unifi")
+    owner.add_to_hass(hass)
+    devs = dr.async_get(hass)
+    ap = devs.async_get_or_create(config_entry_id=owner.entry_id, connections={(dr.CONNECTION_NETWORK_MAC, "ac:8b:a9:44:82:15")})
+    devs.async_update_device(ap.id, area_id=living.id)
+    entry.runtime_data._map_at = -1e9
+    _step(hass, entry, fake, living=-60, kitchen=-80)
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.cyril_room").attributes["wifi_floor"] == main.floor_id

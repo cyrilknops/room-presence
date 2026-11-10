@@ -35,4 +35,8 @@ Fast and stable room tracking for one BLE beacon (for example the iBeacon of the
 3. Give every Bluetooth proxy device an area.
 4. Settings → Devices & services → Add integration → **Room Presence**. Pick the phone.
 
-All margins and times can be changed in the options. The access point floor list takes one `BSSID = floor_id` per line.
+All margins and times can be changed in the options.
+
+### Wi-Fi floor
+
+With the phone's **Wi-Fi BSSID** sensor, the integration knows the floor of the access point you are on: give each access point device (for example from the UniFi integration) an area on a floor. A BSSID is matched to the access point with the same MAC address except the last byte. If that does not work for your access points, the options take a manual list: one `BSSID = floor_id` per line.

@@ -72,6 +72,34 @@ def parse_bssid_floors(text: str | None) -> dict[str, str]:
     return out
 
 
+def _mac_bytes(mac: str) -> bytes | None:
+    try:
+        b = bytes.fromhex(mac.replace(":", "").replace("-", ""))
+    except ValueError:
+        return None
+    return b if len(b) == 6 else None
+
+
+def match_access_point(bssid: str, macs: dict[str, str]) -> str | None:
+    """Find the access point of a BSSID: same MAC except the last byte (and the local bit).
+
+    A BSSID is the AP MAC with a small change per radio and SSID. Returns the value of
+    the best match in `macs` (mac -> value), or None.
+    """
+    b = _mac_bytes(bssid)
+    if b is None:
+        return None
+    best: tuple[int, str] | None = None
+    for mac, value in macs.items():
+        m = _mac_bytes(mac)
+        if m is None or (m[0] | 0x02) != (b[0] | 0x02) or m[1:5] != b[1:5]:
+            continue
+        diff = abs(m[5] - b[5])
+        if diff <= 16 and (best is None or diff < best[0]):
+            best = (diff, value)
+    return best[1] if best else None
+
+
 def _adv_time(scanner: Any, address: str) -> float | None:
     """Monotonic time of the last advertisement of an address on one scanner."""
     prev = getattr(scanner, "_previous_service_info", None)
@@ -97,6 +125,7 @@ class RoomTracker:
         settings = Settings(**{k: float(cfg.get(k, d[0])) for k, d in TUNING.items()})
         self.engine = RoomEngine(settings)
         self.bssid_floors = parse_bssid_floors(cfg.get(CONF_BSSID_FLOORS))
+        self.ap_floor: dict[str, str] = {}
         self.decision: Decision | None = None
         self.raw_best: str | None = None
         self.context = Context()
@@ -168,6 +197,16 @@ class RoomTracker:
                 scanner_area[source] = device.area_id
         self.engine.scanner_area = scanner_area
         self.engine.area_floor = {a.id: a.floor_id for a in area_reg.async_list_areas()}
+        # Access points (any device with a MAC and an area on a floor) for the Wi-Fi floor
+        ap_floor: dict[str, str] = {}
+        for device in dev_reg.devices.values():
+            floor = self.engine.area_floor.get(device.area_id) if device.area_id else None
+            if not floor:
+                continue
+            for kind, mac in device.connections:
+                if kind == dr.CONNECTION_NETWORK_MAC:
+                    ap_floor[mac.lower()] = floor
+        self.ap_floor = ap_floor
 
     def _collect(self) -> None:
         now = bluetooth.MONOTONIC_TIME()
@@ -239,8 +278,9 @@ class RoomTracker:
                 elif now - self._mono_of(state.last_changed) < window:
                     ctx.motion_recent.add(area)
         bssid = hass.states.get(cfg.get(CONF_BSSID) or "")
-        if bssid is not None and self.bssid_floors:
-            ctx.wifi_floor = self.bssid_floors.get(bssid.state.lower())
+        if bssid is not None and bssid.state not in ("unknown", "unavailable", "<not connected>"):
+            # The manual list first, else the floor of the access point device
+            ctx.wifi_floor = self.bssid_floors.get(bssid.state.lower()) or match_access_point(bssid.state, self.ap_floor)
         return ctx
 
     # -------------------------------------------------------------- loop

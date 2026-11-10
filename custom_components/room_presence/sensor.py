@@ -49,7 +49,7 @@ class RoomSensor(_Base):
     _attr_translation_key = "room"
     _attr_icon = "mdi:home-account"
     # These change every few seconds: keep them out of the history database
-    _unrecorded_attributes = frozenset({"areas", "lead_db", "reason", "last_seen_s", "context"})
+    _unrecorded_attributes = frozenset({"areas", "lead_db", "reason", "last_seen_s", "context", "wifi_floor"})
 
     def __init__(self, tracker: RoomTracker) -> None:
         super().__init__(tracker)
@@ -74,6 +74,7 @@ class RoomSensor(_Base):
             "last_seen_s": t.last_seen_ago,
             "areas": {a: round(v, 1) for a, v in sorted((d.areas if d else {}).items(), key=lambda x: -x[1])[:6]},
             "context": "moving" if ctx.moving else "still" if ctx.still else "normal",
+            "wifi_floor": ctx.wifi_floor,
         }
 
 
