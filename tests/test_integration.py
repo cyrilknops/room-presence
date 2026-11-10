@@ -282,20 +282,3 @@ async def test_motion_room_picks_likely_room_or_none(hass: HomeAssistant) -> Non
     st = hass.states.get(ents["motion_room"])
     assert st.state == "Living Room" and st.attributes["rssi"] == -60
 
-
-async def test_occupancy_is_ignored_when_device_has_motion(hass: HomeAssistant) -> None:
-    fake = FakeBT()
-    entry, living, kitchen = await _setup(hass, fake)
-    owner = MockConfigEntry(domain="zha")
-    owner.add_to_hass(hass)
-    dev = dr.async_get(hass).async_get_or_create(config_entry_id=owner.entry_id, identifiers={("zha", "aq2")})
-    dr.async_get(hass).async_update_device(dev.id, area_id=kitchen.id)
-    reg = er.async_get(hass)
-    for name, cls, state in (("aq2_motion", "motion", "off"), ("aq2_occupancy", "occupancy", "on")):
-        e = reg.async_get_or_create("binary_sensor", "zha", name, suggested_object_id=name, device_id=dev.id)
-        hass.states.async_set(e.entity_id, state, {"device_class": cls}, timestamp=time.time() - 100)
-    _step(hass, entry, fake, living=-60, kitchen=-80)
-    await hass.async_block_till_done()
-    sources = entry.runtime_data.motion_sources
-    assert "binary_sensor.aq2_occupancy" not in sources
-    assert sources["binary_sensor.aq2_motion"]["status"] == "clear"

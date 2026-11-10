@@ -283,20 +283,12 @@ class RoomTracker:
                 st for st in hass.states.async_all("binary_sensor")
                 if st.attributes.get("device_class") in MOTION_CLASSES and st.state in ("on", "off")
             ]
-            # A device with a real motion entity: skip its occupancy entity (ZHA quirks such as the
-            # Aqara aq2 keep occupancy on for about 10 minutes after the last motion)
-            with_motion = set()
-            for st in candidates:
-                if st.attributes.get("device_class") == "motion" and (ent := ent_reg.async_get(st.entity_id)) and ent.device_id:
-                    with_motion.add(ent.device_id)
             for state in candidates:
                 eid = state.entity_id
                 if any(s in eid for s in MOTION_SKIP):
                     continue
                 entry = ent_reg.async_get(eid)
                 if entry is None or entry.hidden or entry.platform in MOTION_SKIP_PLATFORMS:
-                    continue
-                if state.attributes.get("device_class") != "motion" and entry.device_id in with_motion:
                     continue
                 area = entry.area_id
                 if not area and entry.device_id and (dev := dev_reg.async_get(entry.device_id)):
