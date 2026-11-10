@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-import time
-
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.const import SIGNAL_STRENGTH_DECIBELS_MILLIWATT, EntityCategory
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -23,26 +22,21 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     tracker = entry.runtime_data
-    async_add_entities([RoomSensor(tracker), RawRoomSensor(tracker)])
-    added: set[str] = set()
-
-    def _add_sources(sources: list[str]) -> None:
-        fresh = [s for s in sources if s not in added]
-        added.update(fresh)
-        if fresh:
-            async_add_entities(SourceSensor(tracker, s) for s in fresh)
-
-    tracker.on_new_sources(_add_sources)
-    async_add_entities([WifiSensor(tracker), PhoneSensor(tracker)])
-    motion_added: set[str] = set()
-
-    def _add_motion(eids: list[str]) -> None:
-        fresh = [e for e in eids if e not in motion_added]
-        motion_added.update(fresh)
-        if fresh:
-            async_add_entities(MotionSourceSensor(tracker, e) for e in fresh)
-
-    tracker.on_new_motion(_add_motion)
+    # Older versions made one sensor per source: remove those
+    ent_reg = er.async_get(hass)
+    for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        if ent.unique_id.startswith((f"{entry.entry_id}_source_", f"{entry.entry_id}_motion_")):
+            ent_reg.async_remove(ent.entity_id)
+    async_add_entities(
+        [
+            RoomSensor(tracker),
+            RawRoomSensor(tracker),
+            StrongestSourceSensor(tracker),
+            LastMotionSensor(tracker),
+            WifiSensor(tracker),
+            PhoneSensor(tracker),
+        ]
+    )
 
 
 class _Base(SensorEntity):
@@ -116,55 +110,6 @@ class RawRoomSensor(_Base):
         return self.tracker.area_name(self.tracker.raw_best)
 
 
-class SourceSensor(_Base):
-    """What one Bluetooth source (proxy) hears from the beacon, in dBm.
-
-    It writes its state only on a change of 3 dB or more, or once a minute, to keep the history small.
-    """
-
-    _attr_icon = "mdi:bluetooth-audio"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
-    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
-    _unrecorded_attributes = frozenset({"last_sample_s", "report_gap_s"})
-    MIN_STEP = 3
-    MAX_AGE = 60.0
-
-    def __init__(self, tracker: RoomTracker, source: str) -> None:
-        super().__init__(tracker)
-        self.source = source
-        self._attr_unique_id = f"{tracker.entry.entry_id}_source_{source.replace(':', '').lower()}"
-        self._attr_name = f"{tracker.sources.get(source, source)} signal"
-        self._info: dict[str, Any] = tracker.source_info(source)
-        self._written_at = 0.0
-
-    async def async_added_to_hass(self) -> None:
-        self.async_on_remove(self.tracker.add_listener(self._maybe_write))
-
-    def _maybe_write(self) -> None:
-        info = self.tracker.source_info(self.source)
-        old = self._info.get("rssi")
-        new = info["rssi"]
-        changed = (old is None) != (new is None) or (old is not None and abs(new - old) >= self.MIN_STEP)
-        if changed or info["area"] != self._info.get("area") or time.monotonic() - self._written_at >= self.MAX_AGE:
-            self._info = info
-            self._written_at = time.monotonic()
-            self.async_write_ha_state()
-
-    @property
-    def native_value(self) -> int | None:
-        return self._info.get("rssi")
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "source": self.source,
-            "area": self._info.get("area"),
-            "last_sample_s": self._info.get("last_sample_s"),
-            "report_gap_s": self._info.get("report_gap_s"),
-        }
-
-
 class WifiSensor(_Base):
     """The access point the phone is on, and its floor."""
 
@@ -212,30 +157,57 @@ class PhoneSensor(_Base):
         return {"screen": p.get("screen"), "activity": p.get("activity"), "screen_on_recent": p.get("screen_on_recent")}
 
 
-class MotionSourceSensor(_Base):
-    """One motion sensor that Room Presence uses: motion now, recent (still counts) or clear."""
 
+class StrongestSourceSensor(_Base):
+    """The Bluetooth proxy that hears the beacon best now."""
+
+    _attr_icon = "mdi:bluetooth-audio"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = ["motion", "recent", "clear"]
+    _attr_translation_key = "strongest_source"
+    _unrecorded_attributes = frozenset({"rssi", "sources_hearing"})
 
-    def __init__(self, tracker: RoomTracker, entity_id: str) -> None:
+    def __init__(self, tracker: RoomTracker) -> None:
         super().__init__(tracker)
-        self.source = entity_id
-        info = tracker.motion_sources.get(entity_id, {})
-        self._attr_unique_id = f"{tracker.entry.entry_id}_motion_{entity_id.split('.', 1)[1]}"
-        area = tracker.area_name(info.get("area_id")) or ""
-        self._attr_name = f"Motion {area} ({info.get('name', entity_id)})".replace("  ", " ")
-
-    @property
-    def icon(self) -> str:
-        return "mdi:motion-sensor" if self.native_value != "clear" else "mdi:motion-sensor-off"
+        self._attr_unique_id = f"{tracker.entry.entry_id}_strongest_source"
 
     @property
     def native_value(self) -> str | None:
-        return self.tracker.motion_sources.get(self.source, {}).get("status")
+        best = self.tracker.strongest_source()
+        return best["name"] if best else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        info = self.tracker.motion_sources.get(self.source, {})
-        return {"source": self.source, "area": self.tracker.area_name(info.get("area_id")), "last_change": info.get("last_change")}
+        best = self.tracker.strongest_source() or {}
+        return {
+            "source": best.get("source"),
+            "rssi": best.get("rssi"),
+            "area": best.get("area"),
+            "sources_hearing": best.get("hearing", 0),
+        }
+
+
+class LastMotionSensor(_Base):
+    """The room with the newest motion, from the motion sensors Room Presence uses."""
+
+    _attr_icon = "mdi:motion-sensor"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "last_motion"
+
+    def __init__(self, tracker: RoomTracker) -> None:
+        super().__init__(tracker)
+        self._attr_unique_id = f"{tracker.entry.entry_id}_last_motion"
+
+    @property
+    def native_value(self) -> str | None:
+        last = self.tracker.last_motion()
+        return self.tracker.area_name(last["area_id"]) if last else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        last = self.tracker.last_motion() or {}
+        return {
+            "sensor": last.get("name"),
+            "entity_id": last.get("entity_id"),
+            "status": last.get("status"),
+            "last_change": last.get("last_change"),
+        }

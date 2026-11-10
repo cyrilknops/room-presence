@@ -133,13 +133,11 @@ class RoomTracker:
         self._listeners: list[Callable[[], None]] = []
         # Every Bluetooth source seen: source -> display name (for the diagnostic sensors)
         self.sources: dict[str, str] = {}
-        self._source_added: Callable[[list[str]], None] | None = None
         # Other sources, for the diagnostic sensors
         self.ap_name: dict[str, str] = {}
         self.wifi: dict[str, Any] = {}
         self.phone: dict[str, Any] = {}
         self.motion_sources: dict[str, dict[str, Any]] = {}
-        self._motion_added: Callable[[list[str]], None] | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
         self._map_at = -1e9
         self._screen_on_at: float | None = None
@@ -193,7 +191,6 @@ class RoomTracker:
         dev_reg = dr.async_get(self.hass)
         area_reg = ar.async_get(self.hass)
         scanner_area: dict[str, str] = {}
-        new: list[str] = []
         for scanner in bluetooth.async_current_scanners(self.hass):
             source = scanner.source.upper()
             device = None
@@ -207,12 +204,8 @@ class RoomTracker:
                 scanner_area[source] = device.area_id
             name = (device.name_by_user or device.name) if device else (getattr(scanner, "name", None) or source)
             name = re.sub(r"\s*\([0-9A-Fa-f:]{17}\)\s*$", "", name or source).strip() or source
-            if source not in self.sources:
-                new.append(source)
             self.sources[source] = name
         self.engine.scanner_area = scanner_area
-        if new and self._source_added:
-            self._source_added(new)
         self.engine.area_floor = {a.id: a.floor_id for a in area_reg.async_list_areas()}
         # Access points (any device with a MAC and an area on a floor) for the Wi-Fi floor
         ap_floor: dict[str, str] = {}
@@ -313,10 +306,7 @@ class RoomTracker:
                     "name": state.attributes.get("friendly_name") or eid,
                     "last_change": state.last_changed.isoformat(),
                 }
-        new = [eid for eid in motion if eid not in self.motion_sources]
-        self.motion_sources = {**self.motion_sources, **motion}
-        if new and self._motion_added:
-            self._motion_added(new)
+        self.motion_sources = motion
         bssid = hass.states.get(cfg.get(CONF_BSSID) or "")
         self.wifi = {"bssid": bssid.state if bssid else None, "access_point": None, "floor": None, "from": None}
         if bssid is not None and bssid.state not in ("unknown", "unavailable", "<not connected>"):
@@ -365,32 +355,27 @@ class RoomTracker:
         area = ar.async_get(self.hass).async_get_area(area_id)
         return area.name if area else area_id
 
-    @callback
-    def on_new_motion(self, cb: Callable[[list[str]], None]) -> None:
-        self._motion_added = cb
-        if self.motion_sources:
-            cb(list(self.motion_sources))
-
-    @callback
-    def on_new_sources(self, cb: Callable[[list[str]], None]) -> None:
-        """The sensor platform adds a diagnostic sensor for each new source."""
-        self._source_added = cb
-        if self.sources:
-            cb(list(self.sources))
-
-    def source_info(self, source: str) -> dict[str, Any]:
-        engine = self.engine
-        now = bluetooth.MONOTONIC_TIME()
-        q = engine._samples.get(source)  # noqa: SLF001
-        value = engine.scanner_values(now).get(source)
-        area = engine.scanner_area.get(source)
+    def strongest_source(self) -> dict[str, Any] | None:
+        values = self.engine.scanner_values(bluetooth.MONOTONIC_TIME())
+        if not values:
+            return None
+        source = max(values, key=values.get)
         return {
-            "rssi": round(value) if value is not None else None,
-            "area": self.area_name(area),
-            "area_id": area,
-            "last_sample_s": round(now - q[-1][0], 1) if q else None,
-            "report_gap_s": round(engine.gap(source), 1) if q else None,
+            "source": source,
+            "name": self.sources.get(source, source),
+            "rssi": round(values[source]),
+            "area": self.area_name(self.engine.scanner_area.get(source)),
+            "hearing": len(values),
         }
+
+    def last_motion(self) -> dict[str, Any] | None:
+        """Motion now (newest first), else the newest motion that ended."""
+        if not self.motion_sources:
+            return None
+        items = [{"entity_id": eid, **info} for eid, info in self.motion_sources.items()]
+        active = [i for i in items if i["status"] == "motion"]
+        pool = active or items
+        return max(pool, key=lambda i: i["last_change"])
 
     @property
     def last_seen_ago(self) -> float | None:

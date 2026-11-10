@@ -74,6 +74,12 @@
           "normal": "Normal",
           "moving": "Moving"
         }
+      },
+      "strongest_source": {
+        "name": "Strongest source"
+      },
+      "last_motion": {
+        "name": "Last motion"
       }
     }
   }

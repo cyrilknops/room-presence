@@ -207,28 +207,17 @@ async def test_diagnostics_lists_all_sources(hass: HomeAssistant) -> None:
     assert diag["config"]["beacon"] == BEACON
 
 
-async def test_source_sensors_on_device(hass: HomeAssistant) -> None:
+async def test_strongest_source_sensor(hass: HomeAssistant) -> None:
     fake = FakeBT()
     entry, living, kitchen = await _setup(hass, fake)
     _step(hass, entry, fake, living=-61, kitchen=-79)
     await hass.async_block_till_done()
-    ent_reg = er.async_get(hass)
-    sources = [e for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id) if "_source_" in e.unique_id]
-    assert len(sources) == 2
-    assert all(e.entity_category == "diagnostic" for e in sources)
-    states = {hass.states.get(e.entity_id).attributes["source"]: hass.states.get(e.entity_id) for e in sources}
-    assert states[LIVING].state == "-61"
-    assert states[LIVING].attributes["area"] == "Living Room"
-    assert states[LIVING].attributes["unit_of_measurement"] == "dBm"
-    # A change below 3 dB does not write a new state
-    _step(hass, entry, fake, living=-62, kitchen=-79)
-    await hass.async_block_till_done()
-    assert hass.states.get(states[LIVING].entity_id).state == "-61"
-    _step(hass, entry, fake, living=-70, kitchen=-79)
-    _step(hass, entry, fake, living=-70, kitchen=-79)
-    _step(hass, entry, fake, living=-70, kitchen=-79)
-    await hass.async_block_till_done()
-    assert int(hass.states.get(states[LIVING].entity_id).state) <= -64
+    reg = er.async_get(hass)
+    ents = {e.unique_id.split("_", 1)[1]: e.entity_id for e in er.async_entries_for_config_entry(reg, entry.entry_id)}
+    assert not any(k.startswith(("source_", "motion_")) for k in ents)
+    st = hass.states.get(ents["strongest_source"])
+    assert st.attributes["source"] == LIVING and st.attributes["rssi"] == -61
+    assert st.attributes["area"] == "Living Room" and st.attributes["sources_hearing"] == 2
 
 
 async def test_wifi_phone_and_motion_sources_on_device(hass: HomeAssistant) -> None:
@@ -261,5 +250,6 @@ async def test_wifi_phone_and_motion_sources_on_device(hass: HomeAssistant) -> N
     wifi = hass.states.get(ents["wifi"])
     assert wifi.state == "U6-Pro Beneden" and wifi.attributes["floor_id"] == main.floor_id
     assert hass.states.get(ents["phone"]).state == "still"
-    motion = hass.states.get(ents["motion_kitchen_motion"])
-    assert motion.state == "motion" and motion.attributes["area"] == "Kitchen"
+    motion = hass.states.get(ents["last_motion"])
+    assert motion.state == "Kitchen" and motion.attributes["status"] == "motion"
+    assert motion.attributes["sensor"] == "Keuken beweging"
