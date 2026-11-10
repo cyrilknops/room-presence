@@ -185,3 +185,23 @@ async def test_wifi_floor_from_access_point_area(hass: HomeAssistant) -> None:
     _step(hass, entry, fake, living=-60, kitchen=-80)
     await hass.async_block_till_done()
     assert hass.states.get("sensor.cyril_room").attributes["wifi_floor"] == main.floor_id
+
+
+async def test_diagnostics_lists_all_sources(hass: HomeAssistant) -> None:
+    from custom_components.room_presence.diagnostics import async_get_config_entry_diagnostics
+
+    fake = FakeBT()
+    fake.scanners["BB:00:00:00:00:09"] = SimpleNamespace(source="BB:00:00:00:00:09", name="Orphan proxy", _previous_service_info={})
+    entry, living, kitchen = await _setup(hass, fake)
+    _step(hass, entry, fake, living=-61, kitchen=-79)
+    with patch("custom_components.room_presence.diagnostics.bluetooth", fake):
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+    by_src = {s["source"]: s for s in diag["sources"]}
+    assert set(by_src) == {LIVING, KITCHEN, "BB:00:00:00:00:09"}
+    assert by_src[LIVING]["area"] == "Living Room" and by_src[LIVING]["rssi_now"] == -61
+    assert by_src[LIVING]["hears_beacon"] is True
+    assert by_src["BB:00:00:00:00:09"]["hears_beacon"] is False
+    assert by_src["BB:00:00:00:00:09"]["problem"] == "no device found for this source"
+    assert diag["sources"][0]["source"] == LIVING  # strongest first
+    assert diag["decision"]["area"] == "Living Room"
+    assert diag["config"]["beacon"] == BEACON
