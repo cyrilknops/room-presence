@@ -95,4 +95,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: RoomPre
         "beacon_addresses": {a: (round(now - t, 1) if t != float("inf") else "fixed") for a, t in tracker.addresses.items()},
         "access_points": tracker.ap_floor,
         "sources": sources,
+        "wifi": tracker.wifi,
+        "phone": tracker.phone,
+        "motion_sources": {
+            eid: {**info, "area": area_name(info.get("area_id"))} for eid, info in sorted(tracker.motion_sources.items())
+        },
     }

@@ -63,6 +63,17 @@
       },
       "raw_room": {
         "name": "Strongest room"
+      },
+      "wifi": {
+        "name": "Wi-Fi access point"
+      },
+      "phone": {
+        "name": "Phone state",
+        "state": {
+          "still": "Still",
+          "normal": "Normal",
+          "moving": "Moving"
+        }
       }
     }
   }

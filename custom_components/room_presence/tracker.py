@@ -131,6 +131,15 @@ class RoomTracker:
         self.context = Context()
         self._last_stamp: dict[tuple[str, str], float] = {}
         self._listeners: list[Callable[[], None]] = []
+        # Every Bluetooth source seen: source -> display name (for the diagnostic sensors)
+        self.sources: dict[str, str] = {}
+        self._source_added: Callable[[list[str]], None] | None = None
+        # Other sources, for the diagnostic sensors
+        self.ap_name: dict[str, str] = {}
+        self.wifi: dict[str, Any] = {}
+        self.phone: dict[str, Any] = {}
+        self.motion_sources: dict[str, dict[str, Any]] = {}
+        self._motion_added: Callable[[list[str]], None] | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
         self._map_at = -1e9
         self._screen_on_at: float | None = None
@@ -184,6 +193,7 @@ class RoomTracker:
         dev_reg = dr.async_get(self.hass)
         area_reg = ar.async_get(self.hass)
         scanner_area: dict[str, str] = {}
+        new: list[str] = []
         for scanner in bluetooth.async_current_scanners(self.hass):
             source = scanner.source.upper()
             device = None
@@ -195,10 +205,18 @@ class RoomTracker:
                     break
             if device and device.area_id:
                 scanner_area[source] = device.area_id
+            name = (device.name_by_user or device.name) if device else (getattr(scanner, "name", None) or source)
+            name = re.sub(r"\s*\([0-9A-Fa-f:]{17}\)\s*$", "", name or source).strip() or source
+            if source not in self.sources:
+                new.append(source)
+            self.sources[source] = name
         self.engine.scanner_area = scanner_area
+        if new and self._source_added:
+            self._source_added(new)
         self.engine.area_floor = {a.id: a.floor_id for a in area_reg.async_list_areas()}
         # Access points (any device with a MAC and an area on a floor) for the Wi-Fi floor
         ap_floor: dict[str, str] = {}
+        ap_name: dict[str, str] = {}
         for device in dev_reg.devices.values():
             floor = self.engine.area_floor.get(device.area_id) if device.area_id else None
             if not floor:
@@ -206,7 +224,9 @@ class RoomTracker:
             for kind, mac in device.connections:
                 if kind == dr.CONNECTION_NETWORK_MAC:
                     ap_floor[mac.lower()] = floor
+                    ap_name[mac.lower()] = device.name_by_user or device.name or mac
         self.ap_floor = ap_floor
+        self.ap_name = ap_name
 
     def _collect(self) -> None:
         now = bluetooth.MONOTONIC_TIME()
@@ -254,6 +274,13 @@ class RoomTracker:
         ctx.moving = (activity in MOVING_ACTIVITIES) or screen_recent
         ctx.still = (not ctx.moving and inter is not None and inter.state == "off"
                      and (activity is None or activity in STILL_ACTIVITIES))
+        self.phone = {
+            "state": "moving" if ctx.moving else "still" if ctx.still else "normal",
+            "screen": inter.state if inter else None,
+            "activity": activity,
+            "screen_on_recent": screen_recent,
+        }
+        motion: dict[str, dict[str, Any]] = {}
         if cfg.get(CONF_USE_MOTION, True):
             window = self.engine.settings.motion_window
             ent_reg = er.async_get(hass)
@@ -272,15 +299,36 @@ class RoomTracker:
                     area = dev.area_id
                 if not area:
                     continue
+                status = "clear"
                 if state.state == "on":
                     ctx.motion_on.add(area)
                     ctx.motion_recent.add(area)
+                    status = "motion"
                 elif now - self._mono_of(state.last_changed) < window:
                     ctx.motion_recent.add(area)
+                    status = "recent"
+                motion[eid] = {
+                    "status": status,
+                    "area_id": area,
+                    "name": state.attributes.get("friendly_name") or eid,
+                    "last_change": state.last_changed.isoformat(),
+                }
+        new = [eid for eid in motion if eid not in self.motion_sources]
+        self.motion_sources = {**self.motion_sources, **motion}
+        if new and self._motion_added:
+            self._motion_added(new)
         bssid = hass.states.get(cfg.get(CONF_BSSID) or "")
+        self.wifi = {"bssid": bssid.state if bssid else None, "access_point": None, "floor": None, "from": None}
         if bssid is not None and bssid.state not in ("unknown", "unavailable", "<not connected>"):
             # The manual list first, else the floor of the access point device
-            ctx.wifi_floor = self.bssid_floors.get(bssid.state.lower()) or match_access_point(bssid.state, self.ap_floor)
+            manual = self.bssid_floors.get(bssid.state.lower())
+            ap_mac = match_access_point(bssid.state, {m: m for m in self.ap_floor})
+            ctx.wifi_floor = manual or (self.ap_floor.get(ap_mac) if ap_mac else None)
+            self.wifi.update(
+                access_point=self.ap_name.get(ap_mac) if ap_mac else None,
+                floor=ctx.wifi_floor,
+                **{"from": "manual list" if manual else "access point area" if ap_mac else None},
+            )
         return ctx
 
     # -------------------------------------------------------------- loop
@@ -316,6 +364,33 @@ class RoomTracker:
             return None
         area = ar.async_get(self.hass).async_get_area(area_id)
         return area.name if area else area_id
+
+    @callback
+    def on_new_motion(self, cb: Callable[[list[str]], None]) -> None:
+        self._motion_added = cb
+        if self.motion_sources:
+            cb(list(self.motion_sources))
+
+    @callback
+    def on_new_sources(self, cb: Callable[[list[str]], None]) -> None:
+        """The sensor platform adds a diagnostic sensor for each new source."""
+        self._source_added = cb
+        if self.sources:
+            cb(list(self.sources))
+
+    def source_info(self, source: str) -> dict[str, Any]:
+        engine = self.engine
+        now = bluetooth.MONOTONIC_TIME()
+        q = engine._samples.get(source)  # noqa: SLF001
+        value = engine.scanner_values(now).get(source)
+        area = engine.scanner_area.get(source)
+        return {
+            "rssi": round(value) if value is not None else None,
+            "area": self.area_name(area),
+            "area_id": area,
+            "last_sample_s": round(now - q[-1][0], 1) if q else None,
+            "report_gap_s": round(engine.gap(source), 1) if q else None,
+        }
 
     @property
     def last_seen_ago(self) -> float | None:

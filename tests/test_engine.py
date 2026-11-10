@@ -172,3 +172,11 @@ def test_slow_scanner_is_not_lost_too_early():
         d = e.evaluate(t)
         t += 0.5
     assert d.area == "living"
+
+
+def test_faded_reading_below_floor_is_dropped():
+    e = engine()
+    feed(e, 0, A1=-95)
+    assert e.area_values(0) == {"living": -95}
+    # 6 s later: -95 - (6 - 1.5) * 4 = -113, below -110
+    assert e.area_values(6) == {}

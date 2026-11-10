@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from statistics import median
 
 NO_SIGNAL = -120.0
+FLOOR_DBM = -110.0
 
 
 @dataclass
@@ -112,7 +113,9 @@ class RoomEngine:
             recent = [r for t, r in q if now - t <= max(s.window, 2 * gap)] or [q[-1][1]]
             # A scanner that stops hearing the beacon (you walked away) fades out
             fade = max(0.0, now - q[-1][0] - max(s.fade_after, 1.5 * gap)) * s.fade_rate
-            out[scanner] = median(recent) + self.offsets.get(scanner, 0.0) - fade
+            value = median(recent) + self.offsets.get(scanner, 0.0) - fade
+            if value >= FLOOR_DBM:  # faded below what a scanner can hear: no reading
+                out[scanner] = value
         return out
 
     def _lost_after(self, area: str | None) -> float:

@@ -205,3 +205,61 @@ async def test_diagnostics_lists_all_sources(hass: HomeAssistant) -> None:
     assert diag["sources"][0]["source"] == LIVING  # strongest first
     assert diag["decision"]["area"] == "Living Room"
     assert diag["config"]["beacon"] == BEACON
+
+
+async def test_source_sensors_on_device(hass: HomeAssistant) -> None:
+    fake = FakeBT()
+    entry, living, kitchen = await _setup(hass, fake)
+    _step(hass, entry, fake, living=-61, kitchen=-79)
+    await hass.async_block_till_done()
+    ent_reg = er.async_get(hass)
+    sources = [e for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id) if "_source_" in e.unique_id]
+    assert len(sources) == 2
+    assert all(e.entity_category == "diagnostic" for e in sources)
+    states = {hass.states.get(e.entity_id).attributes["source"]: hass.states.get(e.entity_id) for e in sources}
+    assert states[LIVING].state == "-61"
+    assert states[LIVING].attributes["area"] == "Living Room"
+    assert states[LIVING].attributes["unit_of_measurement"] == "dBm"
+    # A change below 3 dB does not write a new state
+    _step(hass, entry, fake, living=-62, kitchen=-79)
+    await hass.async_block_till_done()
+    assert hass.states.get(states[LIVING].entity_id).state == "-61"
+    _step(hass, entry, fake, living=-70, kitchen=-79)
+    _step(hass, entry, fake, living=-70, kitchen=-79)
+    _step(hass, entry, fake, living=-70, kitchen=-79)
+    await hass.async_block_till_done()
+    assert int(hass.states.get(states[LIVING].entity_id).state) <= -64
+
+
+async def test_wifi_phone_and_motion_sources_on_device(hass: HomeAssistant) -> None:
+    fake = FakeBT()
+    hass.states.async_set("binary_sensor.flip7_interactive", "off")
+    hass.states.async_set("sensor.flip7_detected_activity", "still")
+    hass.states.async_set("sensor.flip7_wi_fi_bssid", "ac:8b:a9:44:82:17")
+    floors = __import__("homeassistant.helpers.floor_registry", fromlist=["x"]).async_get(hass)
+    main = floors.async_create("Main floor")
+    entry, living, kitchen = await _setup(hass, fake, {
+        "interactive_entity": "binary_sensor.flip7_interactive",
+        "activity_entity": "sensor.flip7_detected_activity",
+        "bssid_entity": "sensor.flip7_wi_fi_bssid",
+    })
+    ar.async_get(hass).async_update(kitchen.id, floor_id=main.floor_id)
+    owner = MockConfigEntry(domain="unifi")
+    owner.add_to_hass(hass)
+    devs = dr.async_get(hass)
+    ap = devs.async_get_or_create(config_entry_id=owner.entry_id, name="U6-Pro Beneden", connections={(dr.CONNECTION_NETWORK_MAC, "ac:8b:a9:44:82:15")})
+    devs.async_update_device(ap.id, area_id=kitchen.id)
+    reg = er.async_get(hass)
+    m = reg.async_get_or_create("binary_sensor", "zha", "kmotion", suggested_object_id="kitchen_motion")
+    reg.async_update_entity(m.entity_id, area_id=kitchen.id)
+    hass.states.async_set(m.entity_id, "on", {"device_class": "motion", "friendly_name": "Keuken beweging"})
+    entry.runtime_data._map_at = -1e9
+    _step(hass, entry, fake, living=-60, kitchen=-80)
+    _step(hass, entry, fake, living=-60, kitchen=-80)
+    await hass.async_block_till_done()
+    ents = {e.unique_id.split("_", 1)[1]: e.entity_id for e in er.async_entries_for_config_entry(reg, entry.entry_id)}
+    wifi = hass.states.get(ents["wifi"])
+    assert wifi.state == "U6-Pro Beneden" and wifi.attributes["floor_id"] == main.floor_id
+    assert hass.states.get(ents["phone"]).state == "still"
+    motion = hass.states.get(ents["motion_kitchen_motion"])
+    assert motion.state == "motion" and motion.attributes["area"] == "Kitchen"
