@@ -1,0 +1,69 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Track a beacon",
+        "description": "Pick the phone (companion app BLE transmitter) or type an iBeacon id (uuid_major_minor) or a fixed MAC address. The rooms come from the areas of your Bluetooth proxies.",
+        "data": {
+          "name": "Name",
+          "beacon": "Beacon",
+          "interactive_entity": "Phone screen sensor (interactive)",
+          "activity_entity": "Phone activity sensor",
+          "bssid_entity": "Phone Wi-Fi BSSID sensor",
+          "use_motion": "Use motion sensors"
+        },
+        "data_description": {
+          "name": "Used in the entity names, for example 'Cyril' gives sensor.cyril_room.",
+          "interactive_entity": "Optional. Screen off = the phone lies still: the room holds better.",
+          "activity_entity": "Optional. Walking = switch faster.",
+          "bssid_entity": "Optional. With the floor list in the options, a room on another floor is harder to pick.",
+          "use_motion": "Motion in a room makes a switch to that room faster."
+        }
+      }
+    },
+    "error": {
+      "bad_beacon": "Not a valid iBeacon id (uuid_major_minor) or MAC address."
+    },
+    "abort": {
+      "already_configured": "This beacon is already tracked."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Room Presence settings",
+        "data": {
+          "interactive_entity": "Phone screen sensor (interactive)",
+          "activity_entity": "Phone activity sensor",
+          "bssid_entity": "Phone Wi-Fi BSSID sensor",
+          "use_motion": "Use motion sensors",
+          "bssid_floors": "Access point floors",
+          "margin": "Switch margin",
+          "dwell": "Switch time",
+          "still_margin": "Switch margin when the phone is still",
+          "still_dwell": "Switch time when the phone is still",
+          "moving_margin": "Switch margin when moving",
+          "moving_dwell": "Switch time when moving",
+          "motion_bonus": "Motion bonus",
+          "floor_penalty": "Other floor penalty",
+          "away_after": "Unknown after no signal for"
+        },
+        "data_description": {
+          "bssid_floors": "One per line: BSSID = floor id, for example aa:bb:cc:dd:ee:ff = upstairs.",
+          "margin": "How much stronger (dB) a new room must be.",
+          "dwell": "How long the new room must stay stronger."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "room": {
+        "name": "Room"
+      },
+      "raw_room": {
+        "name": "Strongest room"
+      }
+    }
+  }
+}
