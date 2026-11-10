@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "room_presence"
-VERSION: Final = "2026.11.10"
+VERSION: Final = "2026.11.11"
 
 CONF_BEACON: Final = "beacon"  # iBeacon "uuid_major_minor" or a fixed MAC address
 CONF_INTERACTIVE: Final = "interactive_entity"
