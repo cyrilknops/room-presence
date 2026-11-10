@@ -1,5 +1,6 @@
 """Integration tests with fake Bluetooth scanners."""
 
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -214,7 +215,7 @@ async def test_strongest_source_sensor(hass: HomeAssistant) -> None:
     await hass.async_block_till_done()
     reg = er.async_get(hass)
     ents = {e.unique_id.split("_", 1)[1]: e.entity_id for e in er.async_entries_for_config_entry(reg, entry.entry_id)}
-    assert not any(k.startswith(("source_", "motion_")) for k in ents)
+    assert not any(k.startswith("source_") or (k.startswith("motion_") and k != "motion_room") for k in ents)
     st = hass.states.get(ents["strongest_source"])
     assert st.attributes["source"] == LIVING and st.attributes["rssi"] == -61
     assert st.attributes["area"] == "Living Room" and st.attributes["sources_hearing"] == 2
@@ -250,6 +251,51 @@ async def test_wifi_phone_and_motion_sources_on_device(hass: HomeAssistant) -> N
     wifi = hass.states.get(ents["wifi"])
     assert wifi.state == "U6-Pro Beneden" and wifi.attributes["floor_id"] == main.floor_id
     assert hass.states.get(ents["phone"]).state == "still"
-    motion = hass.states.get(ents["last_motion"])
+    motion = hass.states.get(ents["motion_room"])
     assert motion.state == "Kitchen" and motion.attributes["status"] == "motion"
     assert motion.attributes["sensor"] == "Keuken beweging"
+    assert "last_motion" not in ents
+
+
+async def test_motion_room_picks_likely_room_or_none(hass: HomeAssistant) -> None:
+    fake = FakeBT()
+    entry, living, kitchen = await _setup(hass, fake)
+    reg = er.async_get(hass)
+    for name, area in (("living_motion", living.id), ("kitchen_motion", kitchen.id)):
+        e = reg.async_get_or_create("binary_sensor", "zha", name, suggested_object_id=name)
+        reg.async_update_entity(e.entity_id, area_id=area)
+        # Off since 100 s: no motion that counts
+        hass.states.async_set(e.entity_id, "off", {"device_class": "motion"}, timestamp=time.time() - 100)
+    await hass.async_block_till_done()
+    _step(hass, entry, fake, living=-60, kitchen=-80)
+    await hass.async_block_till_done()
+    ents = {e.unique_id.split("_", 1)[1]: e.entity_id for e in er.async_entries_for_config_entry(reg, entry.entry_id)}
+    # No motion anywhere
+    _step(hass, entry, fake, living=-60, kitchen=-80)
+    await hass.async_block_till_done()
+    assert hass.states.get(ents["motion_room"]).state == "None"
+    # Motion in both rooms: the phone is closest to the living room
+    hass.states.async_set("binary_sensor.kitchen_motion", "on", {"device_class": "motion"})
+    hass.states.async_set("binary_sensor.living_motion", "on", {"device_class": "motion"})
+    _step(hass, entry, fake, living=-60, kitchen=-80)
+    await hass.async_block_till_done()
+    st = hass.states.get(ents["motion_room"])
+    assert st.state == "Living Room" and st.attributes["rssi"] == -60
+
+
+async def test_occupancy_is_ignored_when_device_has_motion(hass: HomeAssistant) -> None:
+    fake = FakeBT()
+    entry, living, kitchen = await _setup(hass, fake)
+    owner = MockConfigEntry(domain="zha")
+    owner.add_to_hass(hass)
+    dev = dr.async_get(hass).async_get_or_create(config_entry_id=owner.entry_id, identifiers={("zha", "aq2")})
+    dr.async_get(hass).async_update_device(dev.id, area_id=kitchen.id)
+    reg = er.async_get(hass)
+    for name, cls, state in (("aq2_motion", "motion", "off"), ("aq2_occupancy", "occupancy", "on")):
+        e = reg.async_get_or_create("binary_sensor", "zha", name, suggested_object_id=name, device_id=dev.id)
+        hass.states.async_set(e.entity_id, state, {"device_class": cls}, timestamp=time.time() - 100)
+    _step(hass, entry, fake, living=-60, kitchen=-80)
+    await hass.async_block_till_done()
+    sources = entry.runtime_data.motion_sources
+    assert "binary_sensor.aq2_occupancy" not in sources
+    assert sources["binary_sensor.aq2_motion"]["status"] == "clear"

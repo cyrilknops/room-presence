@@ -25,14 +25,14 @@ async def async_setup_entry(
     # Older versions made one sensor per source: remove those
     ent_reg = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
-        if ent.unique_id.startswith((f"{entry.entry_id}_source_", f"{entry.entry_id}_motion_")):
+        if ent.unique_id.startswith((f"{entry.entry_id}_source_", f"{entry.entry_id}_motion_")) and not ent.unique_id.endswith("_motion_room") or ent.unique_id == f"{entry.entry_id}_last_motion":
             ent_reg.async_remove(ent.entity_id)
     async_add_entities(
         [
             RoomSensor(tracker),
             RawRoomSensor(tracker),
             StrongestSourceSensor(tracker),
-            LastMotionSensor(tracker),
+            MotionRoomSensor(tracker),
             WifiSensor(tracker),
             PhoneSensor(tracker),
         ]
@@ -186,28 +186,31 @@ class StrongestSourceSensor(_Base):
         }
 
 
-class LastMotionSensor(_Base):
-    """The room with the newest motion, from the motion sensors Room Presence uses."""
+class MotionRoomSensor(_Base):
+    """The room with motion where the beacon most likely is, or None without motion anywhere."""
 
-    _attr_icon = "mdi:motion-sensor"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_translation_key = "last_motion"
+    _attr_translation_key = "motion_room"
 
     def __init__(self, tracker: RoomTracker) -> None:
         super().__init__(tracker)
-        self._attr_unique_id = f"{tracker.entry.entry_id}_last_motion"
+        self._attr_unique_id = f"{tracker.entry.entry_id}_motion_room"
 
     @property
-    def native_value(self) -> str | None:
-        last = self.tracker.last_motion()
-        return self.tracker.area_name(last["area_id"]) if last else None
+    def icon(self) -> str:
+        return "mdi:motion-sensor" if self.tracker.motion_room() else "mdi:motion-sensor-off"
+
+    @property
+    def native_value(self) -> str:
+        best = self.tracker.motion_room()
+        return (self.tracker.area_name(best["area_id"]) or "None") if best else "None"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        last = self.tracker.last_motion() or {}
+        best = self.tracker.motion_room() or {}
         return {
-            "sensor": last.get("name"),
-            "entity_id": last.get("entity_id"),
-            "status": last.get("status"),
-            "last_change": last.get("last_change"),
+            "sensor": best.get("name"),
+            "entity_id": best.get("entity_id"),
+            "status": best.get("status"),
+            "rssi": best.get("rssi"),
         }

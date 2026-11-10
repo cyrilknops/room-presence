@@ -138,6 +138,7 @@ class RoomTracker:
         self.wifi: dict[str, Any] = {}
         self.phone: dict[str, Any] = {}
         self.motion_sources: dict[str, dict[str, Any]] = {}
+        self._signature: tuple | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
         self._map_at = -1e9
         self._screen_on_at: float | None = None
@@ -278,14 +279,24 @@ class RoomTracker:
             window = self.engine.settings.motion_window
             ent_reg = er.async_get(hass)
             dev_reg = dr.async_get(hass)
-            for state in hass.states.async_all("binary_sensor"):
-                if state.attributes.get("device_class") not in MOTION_CLASSES or state.state not in ("on", "off"):
-                    continue
+            candidates = [
+                st for st in hass.states.async_all("binary_sensor")
+                if st.attributes.get("device_class") in MOTION_CLASSES and st.state in ("on", "off")
+            ]
+            # A device with a real motion entity: skip its occupancy entity (ZHA quirks such as the
+            # Aqara aq2 keep occupancy on for about 10 minutes after the last motion)
+            with_motion = set()
+            for st in candidates:
+                if st.attributes.get("device_class") == "motion" and (ent := ent_reg.async_get(st.entity_id)) and ent.device_id:
+                    with_motion.add(ent.device_id)
+            for state in candidates:
                 eid = state.entity_id
                 if any(s in eid for s in MOTION_SKIP):
                     continue
                 entry = ent_reg.async_get(eid)
                 if entry is None or entry.hidden or entry.platform in MOTION_SKIP_PLATFORMS:
+                    continue
+                if state.attributes.get("device_class") != "motion" and entry.device_id in with_motion:
                     continue
                 area = entry.area_id
                 if not area and entry.device_id and (dev := dev_reg.async_get(entry.device_id)):
@@ -326,11 +337,19 @@ class RoomTracker:
         now = bluetooth.MONOTONIC_TIME()
         self.context = self._build_context()
         decision = self.engine.evaluate(now, self.context)
+        # Also tell the sensors at once when motion, Wi-Fi or the phone state changes
+        signature = (
+            tuple(sorted((e, i["status"]) for e, i in self.motion_sources.items())),
+            self.wifi.get("access_point") or self.wifi.get("bssid"),
+            self.phone.get("state"),
+        )
         changed = (
             self.decision is None
             or decision.area != self.decision.area
             or decision.best != self.raw_best
+            or signature != self._signature
         )
+        self._signature = signature
         if decision.changed:
             _LOGGER.debug("%s: %s -> %s (%s)", self.entry.title, self.decision and self.decision.area, decision.area, decision.reason)
         self.decision = decision
@@ -368,14 +387,21 @@ class RoomTracker:
             "hearing": len(values),
         }
 
-    def last_motion(self) -> dict[str, Any] | None:
-        """Motion now (newest first), else the newest motion that ended."""
-        if not self.motion_sources:
+    def motion_room(self) -> dict[str, Any] | None:
+        """The room with motion now (or a moment ago) where the beacon most likely is.
+
+        Among the rooms with motion, the one with the strongest Bluetooth signal wins;
+        motion now goes before motion a moment ago. None when there is no motion anywhere.
+        """
+        active = [{"entity_id": eid, **i} for eid, i in self.motion_sources.items() if i["status"] in ("motion", "recent")]
+        if not active:
             return None
-        items = [{"entity_id": eid, **info} for eid, info in self.motion_sources.items()]
-        active = [i for i in items if i["status"] == "motion"]
-        pool = active or items
-        return max(pool, key=lambda i: i["last_change"])
+        areas = self.engine.area_values(bluetooth.MONOTONIC_TIME())
+        best = max(
+            active,
+            key=lambda i: (areas.get(i["area_id"], -999.0), i["status"] == "motion", i["last_change"]),
+        )
+        return {**best, "rssi": round(areas[best["area_id"]]) if best["area_id"] in areas else None}
 
     @property
     def last_seen_ago(self) -> float | None:
